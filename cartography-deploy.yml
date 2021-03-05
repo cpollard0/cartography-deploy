@@ -119,7 +119,6 @@ Resources:
 
   cartographyEc2Instance:
     Type: AWS::EC2::Instance
-    # Metadata:
     Properties:
       ImageId: !Ref latestAmazonLinux2
       InstanceType: t3.micro
