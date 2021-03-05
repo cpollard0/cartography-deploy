@@ -150,7 +150,6 @@ Resources:
           cd /tmp
           wget http://debian.neo4j.org/neotechnology.gpg.key
           rpm --import neotechnology.gpg.key
-          # role_arn = arn:aws:iam::${AWS::AccountId}:role/$(curl http://169.254.169.254/latest/meta-data/iam/security-credentials)
 
           amazon-linux-extras enable java-openjdk11
           yum install -y java-11-amazon-corretto-headless neo4j python37 jq
