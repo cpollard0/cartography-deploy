@@ -1,0 +1,169 @@
+---
+Parameters:
+  latestAmazonLinux2:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+  vpcId:
+    Type: AWS::EC2::VPC::Id
+  subnetId:
+    Type: AWS::EC2::Subnet::Id
+  cartographyVersion:
+    Type: String
+    Default: 0.32.0
+  password:
+    Type: String
+    NoEcho: True
+  ipAddress:
+    Type: String
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Network Configuration"
+        Parameters:
+          - vpcId
+          - subnetId
+      - Label:
+          default: "Other"
+        Parameters:
+          - ipAddress
+          - cartographyVersion
+          - latestAmazonLinux2
+          - password
+    ParameterLabels:
+      vpcId:
+        default: "What VPC should cartography be deployed to?"
+      subnetId:
+        default: "What subnet should cartography be deployed to?"
+      ipAddress:
+        default: "What IP will you be accessing cartography from?"
+      cartographyVersion:
+        default: "What version of cartography do you want to install?"
+      latestAmazonLinux2:
+        default: "Image to use"
+      password:
+        default: "Password for neo4j"
+
+Rules:
+  subnetInVPC:
+    Assertions:
+      - Assert:
+          Fn::EachMemberIn:
+            - Fn::ValueOfAll:
+              - AWS::EC2::Subnet::Id
+              - VpcId
+            - Fn::RefAll: AWS::EC2::VPC::Id
+Resources:
+  instanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref cartographyRole
+  neo4jUser:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: cartography-neo4j-user
+      Description: neo4j user and password
+      SecretString: !Sub '{"username":"neo4j","password":"${password}"}'
+  cartographyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: secretAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref neo4jUser
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+
+  cartographyInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to client host
+      VpcId: !Ref vpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 7474
+          ToPort: 7474
+          CidrIp: !Ref ipAddress
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref ipAddress
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref ipAddress
+        - IpProtocol: tcp
+          FromPort: 7473
+          ToPort: 7473
+          CidrIp: !Ref ipAddress
+        - IpProtocol: tcp
+          FromPort: 7687
+          ToPort: 7687
+          CidrIp: !Ref ipAddress
+
+  cartographyEc2Instance:
+    Type: AWS::EC2::Instance
+    # Metadata:
+    Properties:
+      ImageId: !Ref latestAmazonLinux2
+      InstanceType: t3.micro
+      IamInstanceProfile: !Ref instanceProfile
+      SecurityGroupIds:
+        - !Ref cartographyInstanceSecurityGroup
+      SubnetId: !Ref subnetId
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          cat <<EOF > /etc/yum.repos.d/neo4j.repo
+          [neo4j]
+          name=Neo4j Yum Repo
+          baseurl=http://yum.neo4j.org/stable
+          enabled=1
+          gpgcheck=1
+          EOF
+
+          mkdir ~/.aws
+          touch ~/.aws/config
+          cat <<EOF > ~/.aws/config
+          [default]
+          credential_source = Ec2InstanceMetadata
+          region = us-east-1
+          output=json
+          EOF
+
+          cd /tmp
+          wget http://debian.neo4j.org/neotechnology.gpg.key
+          rpm --import neotechnology.gpg.key
+          # role_arn = arn:aws:iam::${AWS::AccountId}:role/$(curl http://169.254.169.254/latest/meta-data/iam/security-credentials)
+
+          amazon-linux-extras enable java-openjdk11
+          yum install -y java-11-amazon-corretto-headless neo4j python37 jq
+          export NEO4J_PASSWORD=$(aws secretsmanager get-secret-value --secret-id cartography-neo4j-user --query SecretString --output text | jq -r ".password")
+          sed -i '/^#dbms.connectors.default_listen_address/s/^#//' /etc/neo4j/neo4j.conf
+          neo4j-admin set-initial-password $NEO4J_PASSWORD
+          systemctl enable neo4j
+          systemctl start neo4j
+
+          pip3 install cartography
+
+          /usr/local/bin/cartography --neo4j-uri bolt://localhost:7687 --neo4j-password-env-var NEO4J_PASSWORD --neo4j-user $(aws secretsmanager get-secret-value --secret-id cartography-neo4j-user --query SecretString --output text | jq -r ".username")
+
+Outputs:
+  url:
+    Value: !Sub http://${cartographyEc2Instance.PublicIp}:7474
